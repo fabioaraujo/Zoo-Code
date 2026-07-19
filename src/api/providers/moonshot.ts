@@ -1,6 +1,7 @@
 import { moonshotModels, moonshotDefaultModelId, type ModelInfo } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
+import { calculateApiCostOpenAI } from "../../shared/cost"
 
 import type { ApiStreamUsageChunk } from "../transform/stream"
 import { getModelParams } from "../transform/model-params"
@@ -55,12 +56,22 @@ export class MoonshotHandler extends OpenAICompatibleHandler {
 		// Moonshot uses cached_tokens at the top level of raw usage data
 		const rawUsage = usage.raw as { cached_tokens?: number } | undefined
 
+		const inputTokens = usage.inputTokens || 0
+		const outputTokens = usage.outputTokens || 0
+		const cacheReadTokens = rawUsage?.cached_tokens ?? usage.details?.cachedInputTokens ?? 0
+
+		const modelInfo = this.getModel().info
+		const { totalCost } = modelInfo
+			? calculateApiCostOpenAI(modelInfo, inputTokens, outputTokens, 0, cacheReadTokens)
+			: { totalCost: 0 }
+
 		return {
 			type: "usage",
-			inputTokens: usage.inputTokens || 0,
-			outputTokens: usage.outputTokens || 0,
+			inputTokens,
+			outputTokens,
 			cacheWriteTokens: 0,
-			cacheReadTokens: rawUsage?.cached_tokens ?? usage.details?.cachedInputTokens,
+			cacheReadTokens: cacheReadTokens || undefined,
+			totalCost,
 		}
 	}
 
