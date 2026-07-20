@@ -1,6 +1,3 @@
-import { existsSync } from "fs"
-import * as path from "path"
-
 import * as vscode from "vscode"
 
 import type { RooTerminalCallbacks, RooTerminalProcessResultPromise } from "./types"
@@ -8,6 +5,7 @@ import { BaseTerminal } from "./BaseTerminal"
 import { TerminalProcess } from "./TerminalProcess"
 import { ShellIntegrationManager } from "./ShellIntegrationManager"
 import { mergePromise } from "./mergePromise"
+import { TerminalProfileResolver } from "./shell/TerminalProfileResolver"
 
 export class Terminal extends BaseTerminal {
 	public terminal: vscode.Terminal
@@ -292,99 +290,51 @@ export class Terminal extends BaseTerminal {
 	}
 
 	/**
+	 * Lazily-initialized TerminalProfileResolver instance for delegation.
+	 * Created per-call with the current platform/env to avoid stale state.
+	 * Tests that spy on Terminal methods still work because the delegation
+	 * preserves the same logic through the resolver.
+	 */
+	private static getProfileResolver(
+		platform: NodeJS.Platform = process.platform,
+		env: NodeJS.ProcessEnv = process.env,
+	): TerminalProfileResolver {
+		return TerminalProfileResolver.forRuntime(platform, env)
+	}
+
+	/**
 	 * Resolves a profile path to an executable on disk. VS Code's built-in Unix
 	 * profiles commonly use bare command names such as `bash`, so check PATH in
 	 * addition to explicit filesystem paths.
+	 *
+	 * Delegates to {@link TerminalProfileResolver.resolveProfilePath} internally.
 	 */
 	public static resolveProfilePath(
 		profilePath: unknown,
 		platform: NodeJS.Platform = process.platform,
 		env: NodeJS.ProcessEnv = process.env,
 	): string | undefined {
-		const candidates = Array.isArray(profilePath) ? profilePath : [profilePath]
-		const pathValue = env.PATH ?? env.Path ?? env.path
-		const pathEntries = pathValue?.split(platform === "win32" ? ";" : ":") ?? []
-		const platformJoin = platform === "win32" ? path.win32.join : path.posix.join
-
-		for (const value of candidates) {
-			if (typeof value !== "string") {
-				continue
-			}
-
-			const candidate = value.trim()
-
-			if (!candidate) {
-				continue
-			}
-
-			if (/[\\/]/.test(candidate)) {
-				if (existsSync(candidate)) {
-					return candidate
-				}
-
-				continue
-			}
-
-			const extensions =
-				platform === "win32" && path.extname(candidate) === ""
-					? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
-					: [""]
-
-			for (const entry of pathEntries) {
-				const directory = entry.replace(/^"(.*)"$/, "$1")
-
-				for (const extension of extensions) {
-					const resolved = platformJoin(directory, `${candidate}${extension}`)
-
-					if (existsSync(resolved)) {
-						return resolved
-					}
-				}
-			}
-		}
-
-		return undefined
+		return Terminal.getProfileResolver(platform, env).resolveProfilePath(profilePath)
 	}
 
 	/**
 	 * Reads profiles from trusted settings scopes only. Workspace settings are
 	 * intentionally excluded because opening a repository must not allow its
 	 * `.vscode/settings.json` to select an executable for Zoo Code to launch.
+	 *
+	 * Delegates to {@link TerminalProfileResolver.readProfiles} internally.
 	 */
 	public static getConfiguredProfiles(platform: NodeJS.Platform = process.platform): Record<string, unknown> {
-		const platformKey = Terminal.getPlatformProfileKey(platform)
-		const configuration = vscode.workspace.getConfiguration("terminal.integrated.profiles")
-
-		// Some test doubles and older embedders expose get() without inspect().
-		// Falling back to no profiles preserves the trusted-scope guarantee.
-		if (typeof configuration.inspect !== "function") {
-			return {}
-		}
-
-		const inspected = configuration.inspect<Record<string, unknown>>(platformKey)
-
-		return {
-			...(inspected?.defaultValue ?? {}),
-			...(inspected?.globalValue ?? {}),
-		}
+		return Terminal.getProfileResolver(platform).readProfiles()
 	}
 
 	/**
 	 * Reads the configured default profile from trusted settings scopes only.
+	 *
+	 * Delegates to {@link TerminalProfileResolver.readDefaultProfileName} internally.
 	 */
 	public static getConfiguredDefaultProfileName(platform: NodeJS.Platform = process.platform): string | undefined {
-		const platformKey = Terminal.getPlatformProfileKey(platform)
-		const configuration = vscode.workspace.getConfiguration("terminal.integrated")
-
-		// Some test doubles and older embedders expose get() without inspect().
-		// Falling back to undefined preserves the trusted-scope guarantee.
-		if (typeof configuration.inspect !== "function") {
-			return undefined
-		}
-
-		const inspected = configuration.inspect<string>(`defaultProfile.${platformKey}`)
-
-		return inspected?.globalValue ?? inspected?.defaultValue
+		return Terminal.getProfileResolver(platform).readDefaultProfileName()
 	}
 
 	/**
@@ -497,23 +447,14 @@ export class Terminal extends BaseTerminal {
 		return resolved ? Terminal.isFish(resolved) : false
 	}
 
+	/**
+	 * Returns sorted profile names that resolve to trusted, supported shells.
+	 * Excludes cmd.exe profiles (shell integration unsupported).
+	 *
+	 * Delegates to {@link TerminalProfileResolver.getAvailableProfileNames}.
+	 */
 	public static getAvailableProfileNames(platform: NodeJS.Platform = process.platform): string[] {
-		const names: string[] = []
-
-		for (const [name, entry] of Object.entries(Terminal.getConfiguredProfiles(platform))) {
-			if (!entry || typeof entry !== "object") {
-				continue
-			}
-
-			const { path: profilePath } = entry as { path?: unknown }
-			const resolved = Terminal.resolveProfilePath(profilePath, platform)
-
-			if (resolved && !Terminal.isCmdExe(resolved)) {
-				names.push(name)
-			}
-		}
-
-		return names.sort()
+		return Terminal.getProfileResolver(platform).getAvailableProfileNames()
 	}
 
 	/**
@@ -547,72 +488,29 @@ export class Terminal extends BaseTerminal {
 			return undefined
 		}
 
-		const platformKey = Terminal.getPlatformProfileKey(platform)
+		// Delegate to TerminalProfileResolver for path resolution and env
+		// sanitization. The resolver handles source-only profiles, name-based
+		// detection, and blocked env keys. We extract shellArgs from the
+		// raw profile entry here since args are profile-specific.
+		const resolver = Terminal.getProfileResolver(platform)
+		const resolved = resolver.resolveProfile(profileName, "zooProfile")
 
-		const profiles = Terminal.getConfiguredProfiles(platform)
-
-		const profile = profiles?.[profileName] as
-			| {
-					path?: string | string[]
-					args?: string | string[]
-					source?: string
-					env?: Record<string, unknown>
-			  }
-			| null
-			| undefined
-
-		if (!profile) {
-			console.warn(`[Terminal] Configured terminal profile "${profileName}" not found for ${platformKey}.`)
+		if (!resolved) {
 			return undefined
 		}
 
-		const pathValue = Terminal.resolveProfilePath(profile.path, platform)
-
-		if (!pathValue) {
-			// Profiles defined only by `source` (e.g. "PowerShell") can't be mapped to
-			// a shell path here, so we fall back to the default terminal.
-			console.warn(
-				`[Terminal] Terminal profile "${profileName}" has no resolvable "path"; using default terminal.`,
-			)
-			return undefined
-		}
-
-		const shellArgs = Array.isArray(profile.args)
-			? profile.args.filter((arg): arg is string => typeof arg === "string")
-			: typeof profile.args === "string"
-				? [profile.args]
+		// Extract shellArgs from the raw profile entry.
+		const entry = resolved.entry
+		const shellArgs = Array.isArray(entry.args)
+			? entry.args.filter((arg): arg is string => typeof arg === "string")
+			: typeof entry.args === "string"
+				? [entry.args]
 				: undefined
 
-		// VS Code profiles may declare their own `env` (e.g. to set a UTF-8 locale or
-		// a custom PATH). Preserve it so the inline terminal doesn't lose environment
-		// the user configured on the profile. A `null` value unsets that variable.
-		// Values come from user `settings.json`, so sanitize to string/null only.
-		let env: Record<string, string | null> | undefined
-
-		if (profile.env && typeof profile.env === "object") {
-			const sanitized: Record<string, string | null> = {}
-			const blockedKeys = new Set([
-				"ZDOTDIR",
-				"PROMPT_COMMAND",
-				"LD_PRELOAD",
-				"LD_LIBRARY_PATH",
-				"DYLD_INSERT_LIBRARIES",
-				"DYLD_LIBRARY_PATH",
-				"BASH_ENV",
-				"ENV",
-			])
-
-			for (const [key, val] of Object.entries(profile.env)) {
-				if (!blockedKeys.has(key.toUpperCase()) && (typeof val === "string" || val === null)) {
-					sanitized[key] = val
-				}
-			}
-
-			if (Object.keys(sanitized).length > 0) {
-				env = sanitized
-			}
+		return {
+			shellPath: resolved.shell.executable,
+			shellArgs,
+			env: resolved.shell.env,
 		}
-
-		return { shellPath: pathValue, shellArgs, env }
 	}
 }
