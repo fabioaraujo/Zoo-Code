@@ -23,11 +23,13 @@ import {
 } from "../../integrations/terminal/types"
 import { TerminalRegistry } from "../../integrations/terminal/TerminalRegistry"
 import { Terminal } from "../../integrations/terminal/Terminal"
+import { ExecaTerminal } from "../../integrations/terminal/ExecaTerminal"
 import { OutputInterceptor } from "../../integrations/terminal/OutputInterceptor"
 import { Package } from "../../shared/package"
 import { t } from "../../i18n"
 import { getTaskDirectoryPath } from "../../utils/storage"
 import { BaseTool, ToolCallbacks } from "./BaseTool"
+import type { ResolvedCommandEnvironment, ShellInvocationPlan } from "../../integrations/terminal/shell/types"
 
 export { ShellIntegrationError } from "../../integrations/terminal/types"
 
@@ -35,10 +37,57 @@ export function canRetryShellIntegrationError(error: unknown): error is ShellInt
 	return error instanceof ShellIntegrationError && !error.commandSubmitted
 }
 
-export function getTerminalProviderForExecution(terminalShellIntegrationDisabled: boolean): {
+/**
+ * Error thrown when shell integration fails and no same-family fallback plan
+ * is available. The command must NOT be retried under a different shell family.
+ */
+export class ShellFallbackMismatchError extends Error {
+	readonly code = "SHELL_FALLBACK_MISMATCH" as const
+	readonly primaryFamily: string
+	readonly fallbackFamily: string | undefined
+
+	constructor(primaryFamily: string, fallbackFamily: string | undefined) {
+		super(
+			`SHELL_FALLBACK_MISMATCH: Primary shell family "${primaryFamily}" has no compatible fallback` +
+				(fallbackFamily ? ` (fallback family: "${fallbackFamily}")` : " (no fallback plan available)") +
+				". Command was not executed.",
+		)
+		this.name = "ShellFallbackMismatchError"
+		this.primaryFamily = primaryFamily
+		this.fallbackFamily = fallbackFamily
+	}
+}
+
+/**
+ * Determines the terminal provider for command execution.
+ *
+ * When a {@link ResolvedCommandEnvironment} is provided, the provider is
+ * determined from `primaryPlan.provider` — this is the single source of truth
+ * that matches the system prompt and tool description.
+ *
+ * When no environment is provided (legacy callers), falls back to the
+ * original `terminalShellIntegrationDisabled` + `isActiveShellCmdExe()` logic.
+ *
+ * @param terminalShellIntegrationDisabled Whether shell integration is disabled.
+ * @param env Optional resolved command environment snapshot.
+ * @returns The terminal provider and whether this is a cmd.exe fallback.
+ */
+export function getTerminalProviderForExecution(
+	terminalShellIntegrationDisabled: boolean,
+	env?: ResolvedCommandEnvironment,
+): {
 	terminalProvider: RooTerminalProvider
 	isCmdExeFallback: boolean
 } {
+	// When a resolved environment is available, use its primary plan provider.
+	// This ensures the execution provider matches what the system prompt told the model.
+	if (env) {
+		const terminalProvider = env.primaryPlan.provider
+		const isCmdExeFallback = terminalProvider === "execa" && env.primaryPlan.family === "cmd"
+		return { terminalProvider, isCmdExeFallback }
+	}
+
+	// Legacy path: no resolved environment available.
 	const isCmdExeFallback = !terminalShellIntegrationDisabled && Terminal.isActiveShellCmdExe()
 	const terminalProvider = terminalShellIntegrationDisabled || isCmdExeFallback ? "execa" : "vscode"
 
@@ -118,6 +167,11 @@ export class ExecuteCommandTool extends BaseTool<"execute_command"> {
 
 			const { terminalShellIntegrationDisabled = true } = providerState ?? {}
 
+			// Resolve the command environment snapshot for this request.
+			// This is the same snapshot used by the system prompt and tool description.
+			// When available, it provides the primary and fallback invocation plans.
+			const resolvedEnv = task.getResolvedCommandEnvironment()
+
 			// Get command execution timeout from VSCode configuration (in seconds)
 			const commandExecutionTimeoutSeconds = vscode.workspace
 				.getConfiguration(Package.name)
@@ -146,6 +200,7 @@ export class ExecuteCommandTool extends BaseTool<"execute_command"> {
 				terminalShellIntegrationDisabled,
 				commandExecutionTimeout,
 				agentTimeout,
+				resolvedEnv,
 			}
 
 			try {
@@ -161,13 +216,43 @@ export class ExecuteCommandTool extends BaseTool<"execute_command"> {
 				task.supersedePendingAsk()
 
 				if (canRetryShellIntegrationError(error)) {
-					// Silent retry via execa — shell startup race, command was not submitted.
+					// Shell integration failed before the command was submitted.
+					// Retry using the same-family fallback plan from the resolved environment.
+					// This ensures PowerShell commands retry with PowerShell (not cmd.exe).
+					if (resolvedEnv) {
+						// Check that a same-family fallback plan exists.
+						if (!resolvedEnv.fallbackPlan) {
+							// No fallback plan available at all — cannot retry.
+							pushToolResult(
+								formatResponse.toolError(
+									`SHELL_FALLBACK_MISMATCH: No fallback execution plan available for shell family "${resolvedEnv.primaryPlan.family}". Command was not executed.`,
+								),
+							)
+							return
+						}
+
+						// Verify the fallback is the same shell family as the primary.
+						// A cross-family fallback (e.g. PowerShell → cmd.exe) is forbidden.
+						if (resolvedEnv.fallbackPlan.family !== resolvedEnv.primaryPlan.family) {
+							pushToolResult(
+								formatResponse.toolError(
+									`SHELL_FALLBACK_MISMATCH: Primary shell family "${resolvedEnv.primaryPlan.family}" cannot fall back to "${resolvedEnv.fallbackPlan.family}". Command was not executed.`,
+								),
+							)
+							return
+						}
+					}
+
+					// Silent retry via same-family execa fallback — shell startup race, command was not submitted.
 					const status: CommandExecutionStatus = { executionId, status: "fallback" }
 					provider?.postMessageToWebview({ type: "commandExecutionStatus", text: JSON.stringify(status) })
 
 					const [rejected, result] = await executeCommandInTerminal(task, {
 						...options,
 						terminalShellIntegrationDisabled: true,
+						// When a resolved environment exists, force the fallback plan
+						// for the retry so the same-family adapter is used.
+						useFallbackPlan: !!resolvedEnv,
 					})
 
 					if (rejected) {
@@ -209,6 +294,10 @@ export type ExecuteCommandOptions = {
 	terminalShellIntegrationDisabled?: boolean
 	commandExecutionTimeout?: number
 	agentTimeout?: number
+	/** Resolved command environment snapshot from CommandEnvironmentService. */
+	resolvedEnv?: ResolvedCommandEnvironment
+	/** When true, use the fallback plan instead of the primary plan (retry path). */
+	useFallbackPlan?: boolean
 }
 
 export async function executeCommandInTerminal(
@@ -220,6 +309,8 @@ export async function executeCommandInTerminal(
 		terminalShellIntegrationDisabled = true,
 		commandExecutionTimeout = 0,
 		agentTimeout = 0,
+		resolvedEnv,
+		useFallbackPlan = false,
 	}: ExecuteCommandOptions,
 ): Promise<[boolean, ToolResponse]> {
 	// Convert milliseconds back to seconds for display purposes.
@@ -249,7 +340,13 @@ export async function executeCommandInTerminal(
 	let shellIntegrationError: ShellIntegrationError | undefined
 	let hasAskedForCommandOutput = false
 
-	const { terminalProvider, isCmdExeFallback } = getTerminalProviderForExecution(terminalShellIntegrationDisabled)
+	// Determine the terminal provider. When a resolved environment is available,
+	// the provider comes from the primary plan — this is the single source of truth
+	// that matches the system prompt and tool description shown to the model.
+	const { terminalProvider, isCmdExeFallback } = getTerminalProviderForExecution(
+		terminalShellIntegrationDisabled,
+		resolvedEnv,
+	)
 	const provider = await task.providerRef.deref()
 
 	// cmd.exe can't use shell integration — tell the webview to expand the output
@@ -430,7 +527,19 @@ export async function executeCommandInTerminal(
 		}
 	}
 
-	const terminal = await TerminalRegistry.getOrCreateTerminal(workingDir, task.taskId, terminalProvider)
+	// When a resolved environment is available, set the shell family for
+	// terminal reuse keying so that changing shells prevents reuse of terminals
+	// created with a different family.
+	if (resolvedEnv) {
+		TerminalRegistry.setExecaShellFamily(resolvedEnv.primaryPlan.family)
+	}
+
+	const terminal = await TerminalRegistry.getOrCreateTerminal(
+		workingDir,
+		task.taskId,
+		terminalProvider,
+		resolvedEnv,
+	)
 
 	if (terminal instanceof Terminal) {
 		terminal.terminal.show(true)
@@ -439,6 +548,18 @@ export async function executeCommandInTerminal(
 		// a different working directory so that the model will know where the
 		// command actually executed.
 		workingDir = terminal.getCurrentWorkingDirectory()
+	}
+
+	// When using execa with a resolved environment, set the shell invocation
+	// plan so ExecaTerminalProcess uses the family-specific adapter instead of
+	// the legacy `shell: true` path. On the retry path, use the fallback plan.
+	if (terminal instanceof ExecaTerminal && resolvedEnv) {
+		const plan: ShellInvocationPlan | undefined = useFallbackPlan
+			? resolvedEnv.fallbackPlan
+			: resolvedEnv.primaryPlan
+		if (plan) {
+			terminal.setShellInvocationPlan(plan)
+		}
 	}
 
 	const process = terminal.runCommand(command, callbacks)

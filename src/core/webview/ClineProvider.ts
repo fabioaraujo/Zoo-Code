@@ -82,6 +82,9 @@ import type { IndexProgressUpdate } from "../../services/code-index/interfaces/m
 import { MdmService } from "../../services/mdm/MdmService"
 import { SkillsManager } from "../../services/skills/SkillsManager"
 import { UsageStatsService } from "../../services/stats"
+import { CommandEnvironmentService } from "../../integrations/terminal/shell/CommandEnvironmentService"
+import { ShellResolver } from "../../integrations/terminal/shell/ShellResolver"
+import { TerminalProfileResolver } from "../../integrations/terminal/shell/TerminalProfileResolver"
 
 import { fileExistsAtPath } from "../../utils/fs"
 import { setTtsEnabled, setTtsSpeed } from "../../utils/tts"
@@ -182,6 +185,7 @@ export class ClineProvider
 	protected mcpHub?: McpHub // Change from private to protected
 	protected skillsManager?: SkillsManager
 	private usageStatsService?: UsageStatsService
+	private commandEnvironmentService?: CommandEnvironmentService
 	private marketplaceManager: MarketplaceManager
 	private mdmService?: MdmService
 	private taskCreationCallback: (task: Task) => void
@@ -2915,6 +2919,26 @@ export class ClineProvider
 
 	public getSkillsManager(): SkillsManager | undefined {
 		return this.skillsManager
+	}
+
+	/**
+	 * Returns the CommandEnvironmentService instance, lazily initializing it
+	 * on first access. The service resolves the shell environment for each
+	 * API request and provides the same snapshot to the system prompt, tool
+	 * descriptions, and runtime execution.
+	 */
+	public getCommandEnvironmentService(): CommandEnvironmentService | undefined {
+		if (!this.commandEnvironmentService) {
+			try {
+				const profileResolver = TerminalProfileResolver.forRuntime()
+				const resolver = ShellResolver.forRuntime(profileResolver)
+				this.commandEnvironmentService = new CommandEnvironmentService(resolver)
+			} catch (error) {
+				console.error("[ClineProvider] Failed to create CommandEnvironmentService:", error)
+				return undefined
+			}
+		}
+		return this.commandEnvironmentService
 	}
 
 	/**

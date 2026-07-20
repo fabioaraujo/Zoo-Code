@@ -7,7 +7,7 @@ import { TerminalProcess } from "./TerminalProcess"
 import { Terminal } from "./Terminal"
 import { ExecaTerminal } from "./ExecaTerminal"
 import { ShellIntegrationManager } from "./ShellIntegrationManager"
-import type { ShellFamily } from "./shell/types"
+import type { ShellFamily, ResolvedCommandEnvironment } from "./shell/types"
 
 // Although vscode.window.terminals provides a list of all open terminals,
 // there's no way to know whether they're busy or not (exitStatus does not
@@ -202,11 +202,17 @@ export class TerminalRegistry {
 		}
 	}
 
-	public static createTerminal(cwd: string, provider: RooTerminalProvider): RooTerminal {
+	public static createTerminal(
+		cwd: string,
+		provider: RooTerminalProvider,
+		resolvedEnv?: ResolvedCommandEnvironment,
+	): RooTerminal {
 		let newTerminal
 
 		if (provider === "vscode") {
-			newTerminal = new Terminal(this.nextTerminalId++, undefined, cwd)
+			// Pass the resolved environment so the integrated terminal is created
+			// with the same shell executable reported in the system prompt.
+			newTerminal = new Terminal(this.nextTerminalId++, undefined, cwd, resolvedEnv)
 		} else {
 			// Pass the shell-family-aware reuse key so that changing shells
 			// prevents reuse of terminals created with a different family.
@@ -249,6 +255,7 @@ export class TerminalRegistry {
 		cwd: string,
 		taskId?: string,
 		provider: RooTerminalProvider = "vscode",
+		resolvedEnv?: ResolvedCommandEnvironment,
 	): Promise<RooTerminal> {
 		const terminals = this.getAllTerminals()
 		const reuseKey = provider === "vscode" ? Terminal.getReuseKey() : this.getExecaReuseKey()
@@ -291,7 +298,7 @@ export class TerminalRegistry {
 
 		// If no suitable terminal found, create a new one.
 		if (!terminal) {
-			terminal = this.createTerminal(cwd, provider)
+			terminal = this.createTerminal(cwd, provider, resolvedEnv)
 		}
 
 		terminal.taskId = taskId

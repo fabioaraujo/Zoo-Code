@@ -6,6 +6,7 @@ import { TerminalProcess } from "./TerminalProcess"
 import { ShellIntegrationManager } from "./ShellIntegrationManager"
 import { mergePromise } from "./mergePromise"
 import { TerminalProfileResolver } from "./shell/TerminalProfileResolver"
+import type { ResolvedCommandEnvironment } from "./shell/types"
 
 export class Terminal extends BaseTerminal {
 	public terminal: vscode.Terminal
@@ -14,7 +15,20 @@ export class Terminal extends BaseTerminal {
 
 	public activeShellExecution?: vscode.TerminalShellExecution
 
-	constructor(id: number, terminal: vscode.Terminal | undefined, cwd: string) {
+	/**
+	 * @param id Terminal ID.
+	 * @param terminal Existing VS Code terminal to wrap, or undefined to create new.
+	 * @param cwd Working directory.
+	 * @param resolvedEnv Optional resolved command environment. When provided,
+	 *   the integrated terminal is created with the shell executable from
+	 *   `primaryPlan` so it matches the shell reported in the system prompt.
+	 */
+	constructor(
+		id: number,
+		terminal: vscode.Terminal | undefined,
+		cwd: string,
+		resolvedEnv?: ResolvedCommandEnvironment,
+	) {
 		super("vscode", id, cwd, Terminal.getReuseKey())
 
 		const env = Terminal.getEnv()
@@ -25,27 +39,43 @@ export class Terminal extends BaseTerminal {
 		} else {
 			const options: vscode.TerminalOptions = { cwd, name: "Zoo Code", iconPath, env }
 
-			// When the user has chosen a VS Code terminal profile, resolve it to a
-			// shell path/args/env so the integrated terminal uses that shell. When
-			// unset, shellPath/shellArgs are left undefined so VS Code's default
-			// terminal behavior is preserved.
-			const profileShell = Terminal.getProfileShell()
+			// When a resolved command environment is available, use its primary
+			// plan executable so the integrated terminal matches the shell family
+			// reported to the model. This is the single source of truth.
+			if (resolvedEnv?.primaryPlan?.executable) {
+				options.shellPath = resolvedEnv.primaryPlan.executable
 
-			if (profileShell?.shellPath) {
-				options.shellPath = profileShell.shellPath
-
-				if (profileShell.shellArgs) {
-					options.shellArgs = profileShell.shellArgs
+				// Preserve environment overrides from the resolved shell.
+				if (resolvedEnv.primaryPlan.env) {
+					options.env = { ...resolvedEnv.primaryPlan.env, ...env }
 				}
 
 				console.info(
-					`[Terminal] Creating terminal with profile "${Terminal.getTerminalProfile()}" -> ${profileShell.shellPath}`,
+					`[Terminal] Creating terminal with resolved shell: ${resolvedEnv.primaryPlan.executable} (family: ${resolvedEnv.primaryPlan.family})`,
 				)
+			} else {
+				// When the user has chosen a VS Code terminal profile, resolve it to a
+				// shell path/args/env so the integrated terminal uses that shell. When
+				// unset, shellPath/shellArgs are left undefined so VS Code's default
+				// terminal behavior is preserved.
+				const profileShell = Terminal.getProfileShell()
 
-				// Preserve profile-specific variables (e.g. locale/PATH), but keep
-				// Zoo Code's shell-integration controls authoritative.
-				if (profileShell.env) {
-					options.env = { ...profileShell.env, ...env }
+				if (profileShell?.shellPath) {
+					options.shellPath = profileShell.shellPath
+
+					if (profileShell.shellArgs) {
+						options.shellArgs = profileShell.shellArgs
+					}
+
+					console.info(
+						`[Terminal] Creating terminal with profile "${Terminal.getTerminalProfile()}" -> ${profileShell.shellPath}`,
+					)
+
+					// Preserve profile-specific variables (e.g. locale/PATH), but keep
+					// Zoo Code's shell-integration controls authoritative.
+					if (profileShell.env) {
+						options.env = { ...profileShell.env, ...env }
+					}
 				}
 			}
 
