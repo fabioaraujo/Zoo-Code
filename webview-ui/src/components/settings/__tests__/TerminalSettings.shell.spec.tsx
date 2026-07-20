@@ -127,7 +127,7 @@ describe("TerminalSettings inline shell selector", () => {
 
 	it("sends setTerminalShellSelection with profile name when a profile is selected", () => {
 		// Simulate the extension host responding with shell options
-		const { container } = render(
+		render(
 			<TerminalSettings
 				terminalShellIntegrationDisabled={true}
 				setCachedStateField={vi.fn()}

@@ -89,6 +89,7 @@ describe("executeCommandTool", () => {
 			},
 			lastMessageTs: Date.now(),
 			cwd: "/test/workspace",
+			getResolvedCommandEnvironment: vitest.fn().mockReturnValue(undefined),
 		}
 
 		mockAskApproval = vitest.fn().mockResolvedValue(true)
