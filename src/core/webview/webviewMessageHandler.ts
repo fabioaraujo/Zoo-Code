@@ -1746,6 +1746,27 @@ export const webviewMessageHandler = async (
 			break
 		}
 
+		case "requestTerminalShellOptions": {
+			// Ask the CommandEnvironmentService for sanitized trusted shell
+			// options and the current effective shell. Delegates to
+			// ClineProvider.handleRequestTerminalShellOptions().
+			// See ARCH-TERMINAL-001 section 1.9.
+			await provider.handleRequestTerminalShellOptions()
+			break
+		}
+
+		case "setTerminalShellSelection": {
+			// Validate the selection via ShellResolver, persist
+			// terminalShellSelection, invalidate the environment cache,
+			// close idle terminals, and respond with the resolved effective
+			// shell. Delegates to ClineProvider.handleSetTerminalShellSelection().
+			// See ARCH-TERMINAL-001 section 1.9.
+			if (message.terminalShellSelection) {
+				await provider.handleSetTerminalShellSelection(message.terminalShellSelection)
+			}
+			break
+		}
+
 		case "mode":
 			await provider.handleModeSwitch(message.text as Mode)
 			break

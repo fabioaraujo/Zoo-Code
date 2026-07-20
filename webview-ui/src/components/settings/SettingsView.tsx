@@ -190,6 +190,7 @@ const SettingsView = forwardRef<SettingsViewRef, SettingsViewProps>(({ onDone, t
 		terminalZshP10k,
 		terminalZdotdir,
 		terminalProfile,
+		terminalShellSelection,
 		writeDelayMs,
 		diffFuzzyThreshold,
 		showRooIgnoredFiles,
@@ -890,6 +891,7 @@ const SettingsView = forwardRef<SettingsViewRef, SettingsViewProps>(({ onDone, t
 								terminalZshP10k={terminalZshP10k}
 								terminalZdotdir={terminalZdotdir}
 								terminalProfile={terminalProfile}
+								terminalShellSelection={terminalShellSelection}
 								onTerminalProfilePickerOpened={() => setChangeDetected(true)}
 								setCachedStateField={setCachedStateField}
 							/>
