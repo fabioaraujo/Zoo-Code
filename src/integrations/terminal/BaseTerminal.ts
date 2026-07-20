@@ -318,10 +318,27 @@ export abstract class BaseTerminal implements RooTerminal {
 		return BaseTerminal.terminalProfile
 	}
 
+	/**
+	 * @deprecated Use {@link ShellInvocationAdapter} and
+	 * {@link CommandEnvironmentService} instead. This method is retained
+	 * for backward compatibility with the CLI host and legacy settings
+	 * hydration. New code must not call this method.
+	 *
+	 * Sets the shell path used by the legacy `shell: true` Execa fallback.
+	 * @param shellPath The shell executable path, or undefined for default
+	 */
 	public static setExecaShellPath(shellPath: string | undefined): void {
 		BaseTerminal.execaShellPath = shellPath
 	}
 
+	/**
+	 * @deprecated Use {@link ShellInvocationAdapter} and
+	 * {@link CommandEnvironmentService} instead. This method is retained
+	 * for backward compatibility. New code must not call this method.
+	 *
+	 * Gets the shell path used by the legacy `shell: true` Execa fallback.
+	 * @returns The shell executable path, or undefined when not set
+	 */
 	public static getExecaShellPath(): string | undefined {
 		return BaseTerminal.execaShellPath
 	}

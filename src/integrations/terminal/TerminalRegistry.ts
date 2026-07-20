@@ -7,6 +7,7 @@ import { TerminalProcess } from "./TerminalProcess"
 import { Terminal } from "./Terminal"
 import { ExecaTerminal } from "./ExecaTerminal"
 import { ShellIntegrationManager } from "./ShellIntegrationManager"
+import type { ShellFamily } from "./shell/types"
 
 // Although vscode.window.terminals provides a list of all open terminals,
 // there's no way to know whether they're busy or not (exitStatus does not
@@ -22,6 +23,14 @@ export class TerminalRegistry {
 	private static nextTerminalId = 1
 	private static disposables: vscode.Disposable[] = []
 	private static isInitialized = false
+
+	/**
+	 * The current shell family for Execa terminals. When the shell family
+	 * changes (e.g. user switches from PowerShell to bash), idle Execa
+	 * terminals with a different family are not reused. This ensures the
+	 * terminal's invocation plan matches the current shell.
+	 */
+	private static execaShellFamily: ShellFamily | undefined = undefined
 
 	public static initialize() {
 		if (this.isInitialized) {
@@ -199,7 +208,9 @@ export class TerminalRegistry {
 		if (provider === "vscode") {
 			newTerminal = new Terminal(this.nextTerminalId++, undefined, cwd)
 		} else {
-			newTerminal = new ExecaTerminal(this.nextTerminalId++, cwd)
+			// Pass the shell-family-aware reuse key so that changing shells
+			// prevents reuse of terminals created with a different family.
+			newTerminal = new ExecaTerminal(this.nextTerminalId++, cwd, this.getExecaReuseKey())
 		}
 
 		this.terminals.push(newTerminal)
@@ -215,13 +226,32 @@ export class TerminalRegistry {
 	 * @param taskId Optional task ID to associate with the terminal
 	 * @returns A Terminal instance
 	 */
+	/**
+	 * Sets the current shell family for Execa terminal reuse keying.
+	 * When the shell family changes, idle Execa terminals with a different
+	 * family are not reused.
+	 * @param family The shell family, or undefined to reset
+	 */
+	public static setExecaShellFamily(family: ShellFamily | undefined): void {
+		TerminalRegistry.execaShellFamily = family
+	}
+
+	/**
+	 * Gets the current Execa shell family reuse key.
+	 * @returns The reuse key string incorporating provider and shell family
+	 */
+	private static getExecaReuseKey(): string {
+		const family = TerminalRegistry.execaShellFamily
+		return family ? `execa:${family}` : "execa"
+	}
+
 	public static async getOrCreateTerminal(
 		cwd: string,
 		taskId?: string,
 		provider: RooTerminalProvider = "vscode",
 	): Promise<RooTerminal> {
 		const terminals = this.getAllTerminals()
-		const reuseKey = provider === "vscode" ? Terminal.getReuseKey() : provider
+		const reuseKey = provider === "vscode" ? Terminal.getReuseKey() : this.getExecaReuseKey()
 		let terminal: RooTerminal | undefined
 
 		// First priority: Find a terminal already assigned to this task with
